@@ -1,66 +1,115 @@
 """
-Task 5 — Semantic Search Module.
+Task 5 - Semantic Search Module.
 
-Viết module tìm kiếm ngữ nghĩa (dense retrieval) trên vector store.
-
-Yêu cầu:
-    - Input: query string + top_k
-    - Output: danh sách chunks có score, sorted descending
-    - Phải tương thích với embedding model và vector store ở Task 4
+Dense retrieval is served from the local index generated in Task 4:
+    - data/index/chunks.json
+    - data/index/embeddings.npy
 """
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import numpy as np
+
+from .task4_chunking_indexing import EMBEDDING_MODEL
+
+INDEX_DIR = Path(__file__).parent.parent / "data" / "index"
+
+_MODEL = None
+_CHUNKS = None
+_EMBEDDINGS = None
+
+
+def _quality_score(text: str) -> float:
+    """
+    Penalize low-information chunks such as forms filled with dots/placeholders.
+    """
+    length = max(len(text), 1)
+    alnum_ratio = sum(ch.isalnum() for ch in text) / length
+    token_count = len(text.split())
+    token_factor = min(1.0, token_count / 40.0)
+    return max(0.15, alnum_ratio * 1.5) * max(0.25, token_factor)
+
+
+def _load_index() -> tuple[list[dict], np.ndarray]:
+    """Load persisted chunks and embedding matrix from Task 4."""
+    global _CHUNKS, _EMBEDDINGS
+    if _CHUNKS is None:
+        chunks_path = INDEX_DIR / "chunks.json"
+        if not chunks_path.exists():
+            raise FileNotFoundError(
+                "Task 4 index not found. Run src/task4_chunking_indexing.py first."
+            )
+        _CHUNKS = json.loads(chunks_path.read_text(encoding="utf-8"))
+
+    if _EMBEDDINGS is None:
+        embeddings_path = INDEX_DIR / "embeddings.npy"
+        if not embeddings_path.exists():
+            raise FileNotFoundError(
+                "Task 4 embeddings not found. Run src/task4_chunking_indexing.py first."
+            )
+        _EMBEDDINGS = np.load(embeddings_path)
+
+    return _CHUNKS, _EMBEDDINGS
+
+
+def _load_model():
+    """Lazy-load the same embedding model used in Task 4."""
+    global _MODEL
+    if _MODEL is None:
+        from sentence_transformers import SentenceTransformer
+
+        _MODEL = SentenceTransformer(EMBEDDING_MODEL)
+    return _MODEL
 
 
 def semantic_search(query: str, top_k: int = 10) -> list[dict]:
     """
-    Tìm kiếm ngữ nghĩa sử dụng vector similarity.
+    Search by vector similarity using the Task 4 local index.
 
     Args:
-        query: Câu truy vấn
-        top_k: Số lượng kết quả tối đa
+        query: Query string
+        top_k: Maximum number of results
 
     Returns:
-        List of {
-            'content': str,      # Nội dung chunk
-            'score': float,      # Cosine similarity score
-            'metadata': dict     # source, doc_type, chunk_index
-        }
-        Sorted by score descending.
+        List of {'content': str, 'score': float, 'metadata': dict}
+        sorted by score descending.
     """
-    # TODO: Implement semantic search
-    #
-    # Bước 1: Embed query bằng cùng model ở Task 4
-    # Bước 2: Query vector store (cosine similarity)
-    # Bước 3: Return top_k results
-    #
-    # Ví dụ với Weaviate:
-    # import weaviate
-    # from sentence_transformers import SentenceTransformer
-    #
-    # model = SentenceTransformer("BAAI/bge-m3")
-    # query_embedding = model.encode(query).tolist()
-    #
-    # client = weaviate.connect_to_local()
-    # collection = client.collections.get("DrugLawDocs")
-    #
-    # results = collection.query.near_vector(
-    #     near_vector=query_embedding,
-    #     limit=top_k,
-    #     return_metadata=MetadataQuery(distance=True)
-    # )
-    #
-    # return [
-    #     {
-    #         "content": obj.properties["content"],
-    #         "score": 1 - obj.metadata.distance,  # distance → similarity
-    #         "metadata": {"source": obj.properties["source"], ...}
-    #     }
-    #     for obj in results.objects
-    # ]
-    raise NotImplementedError("Implement semantic_search")
+    if top_k <= 0:
+        return []
+
+    chunks, embeddings = _load_index()
+    if not chunks or embeddings.size == 0:
+        return []
+
+    model = _load_model()
+    query_embedding = model.encode(
+        query,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+    )
+    scores = embeddings @ query_embedding
+    top_indices = np.argsort(scores)[::-1][:top_k]
+
+    results = []
+    for idx in top_indices:
+        record = chunks[int(idx)]
+        raw_score = float(scores[int(idx)])
+        final_score = raw_score * _quality_score(record["content"])
+        results.append(
+            {
+                "content": record["content"],
+                "score": final_score,
+                "metadata": record["metadata"],
+            }
+        )
+
+    return sorted(results, key=lambda item: item["score"], reverse=True)
 
 
 if __name__ == "__main__":
-    # Test
-    results = semantic_search("hình phạt cho tội tàng trữ ma tuý", top_k=5)
-    for r in results:
-        print(f"[{r['score']:.3f}] {r['content'][:100]}...")
+    results = semantic_search("hình phạt cho tội tàng trữ ma túy", top_k=5)
+    for result in results:
+        print(f"[{result['score']:.3f}] {result['content'][:100]}...")

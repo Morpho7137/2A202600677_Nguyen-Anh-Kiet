@@ -1,16 +1,11 @@
 """
-Task 9 — Retrieval Pipeline Hoàn Chỉnh.
+Task 9 - Unified retrieval pipeline.
 
-Kết hợp semantic search + lexical search + reranking + PageIndex fallback
-thành một pipeline thống nhất.
-
-Logic:
-    1. Chạy semantic_search + lexical_search song song
-    2. Merge kết quả (RRF hoặc weighted fusion)
-    3. Rerank
-    4. Nếu top result score < threshold → fallback sang PageIndex
-    5. Return top_k results
+This stage does not require an LLM API. It only orchestrates retrieval:
+semantic search + lexical search + merge + rerank + PageIndex fallback.
 """
+
+from __future__ import annotations
 
 from .task5_semantic_search import semantic_search
 from .task6_lexical_search import lexical_search
@@ -22,9 +17,41 @@ from .task8_pageindex_vectorless import pageindex_search
 # CONFIGURATION
 # =============================================================================
 
-SCORE_THRESHOLD = 0.3   # Nếu best score < threshold → fallback PageIndex
+SCORE_THRESHOLD = 0.3
 DEFAULT_TOP_K = 5
-RERANK_METHOD = "cross_encoder"  # "cross_encoder" | "mmr" | "rrf"
+RERANK_METHOD = "cross_encoder"
+
+
+def _mark_source(items: list[dict], source: str) -> list[dict]:
+    marked = []
+    for item in items:
+        enriched = dict(item)
+        enriched["source"] = source
+        marked.append(enriched)
+    return marked
+
+
+def _normalize_scores(items: list[dict]) -> list[dict]:
+    """
+    Normalize scores into [0, 1] so threshold comparisons are less arbitrary
+    across BM25, cosine similarity, and cross-encoder outputs.
+    """
+    if not items:
+        return []
+
+    scores = [float(item.get("score", 0.0)) for item in items]
+    min_score = min(scores)
+    max_score = max(scores)
+
+    normalized = []
+    for item, score in zip(items, scores):
+        enriched = dict(item)
+        if max_score == min_score:
+            enriched["score"] = 1.0 if max_score > 0 else 0.0
+        else:
+            enriched["score"] = (score - min_score) / (max_score - min_score)
+        normalized.append(enriched)
+    return normalized
 
 
 def retrieve(
@@ -34,71 +61,51 @@ def retrieve(
     use_reranking: bool = True,
 ) -> list[dict]:
     """
-    Retrieval pipeline hoàn chỉnh với fallback logic.
+    Unified retrieval pipeline with fallback logic.
 
-    Pipeline:
-        Query
-          ├→ Semantic Search → results_dense
-          ├→ Lexical Search  → results_sparse
-          │
-          ├→ Merge (RRF) → merged_results
-          ├→ Rerank → reranked_results
-          │
-          └→ If best_score < threshold:
-                └→ PageIndex Vectorless → fallback_results
-
-    Args:
-        query: Câu truy vấn
-        top_k: Số lượng kết quả cuối cùng
-        score_threshold: Ngưỡng điểm tối thiểu cho hybrid results
-        use_reranking: Có áp dụng reranking hay không
-
-    Returns:
-        List of {
-            'content': str,
-            'score': float,
-            'metadata': dict,
-            'source': str  # 'hybrid' hoặc 'pageindex'
-        }
+    Steps:
+        1. Run semantic_search + lexical_search
+        2. Merge results with RRF
+        3. Rerank merged candidates
+        4. If best score < threshold -> fallback to PageIndex
+        5. Return top_k results
     """
-    # TODO: Implement full retrieval pipeline
-    #
-    # Step 1: Song song chạy semantic + lexical
-    # dense_results = semantic_search(query, top_k=top_k * 2)
-    # sparse_results = lexical_search(query, top_k=top_k * 2)
-    #
-    # Step 2: Merge bằng RRF
-    # merged = rerank_rrf([dense_results, sparse_results], top_k=top_k * 2)
-    # for item in merged:
-    #     item["source"] = "hybrid"
-    #
-    # Step 3: Rerank
-    # if use_reranking and merged:
-    #     final_results = rerank(query, merged, top_k=top_k, method=RERANK_METHOD)
-    # else:
-    #     final_results = merged[:top_k]
-    #
-    # Step 4: Check threshold → fallback
-    # if not final_results or final_results[0]["score"] < score_threshold:
-    #     print(f"  ⚠ Hybrid score ({final_results[0]['score']:.3f} if final_results else 0}) "
-    #           f"< threshold ({score_threshold}). Fallback → PageIndex")
-    #     fallback = pageindex_search(query, top_k=top_k)
-    #     return fallback
-    #
-    # return final_results[:top_k]
-    raise NotImplementedError("Implement retrieve")
+    if top_k <= 0:
+        return []
+
+    dense_results = semantic_search(query, top_k=top_k * 2)
+    sparse_results = lexical_search(query, top_k=top_k * 2)
+
+    merged = rerank_rrf([dense_results, sparse_results], top_k=top_k * 3)
+    merged = _mark_source(merged, "hybrid")
+    merged = _normalize_scores(merged)
+
+    if use_reranking and merged:
+        reranked = rerank(query, merged, top_k=top_k, method=RERANK_METHOD)
+        final_results = _mark_source(reranked, "hybrid")
+        final_results = _normalize_scores(final_results)
+    else:
+        final_results = merged[:top_k]
+
+    best_score = final_results[0]["score"] if final_results else 0.0
+    if not final_results or best_score < score_threshold:
+        fallback = pageindex_search(query, top_k=top_k)
+        if fallback:
+            return fallback[:top_k]
+
+    return final_results[:top_k]
 
 
 if __name__ == "__main__":
     test_queries = [
-        "Hình phạt cho tội tàng trữ trái phép chất ma tuý",
-        "Nghệ sĩ nào bị bắt vì sử dụng ma tuý năm 2024",
-        "Luật phòng chống ma tuý 2021 quy định gì về cai nghiện",
+        "Hình phạt cho tội tàng trữ trái phép chất ma túy",
+        "Nghệ sĩ nào bị bắt vì sử dụng ma túy năm 2024",
+        "Luật phòng chống ma túy 2021 quy định gì về cai nghiện",
     ]
 
-    for q in test_queries:
-        print(f"\nQuery: {q}")
+    for query in test_queries:
+        print(f"\nQuery: {query}")
         print("-" * 60)
-        results = retrieve(q, top_k=3)
-        for i, r in enumerate(results, 1):
-            print(f"  {i}. [{r['score']:.3f}] [{r['source']}] {r['content'][:80]}...")
+        results = retrieve(query, top_k=3)
+        for i, result in enumerate(results, 1):
+            print(f"  {i}. [{result['score']:.3f}] [{result['source']}] {result['content'][:80]}...")
