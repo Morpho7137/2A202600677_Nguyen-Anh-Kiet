@@ -1,5 +1,15 @@
 # Ngày 8 — RAG Pipeline v2
 
+## Day 9 Submission
+
+The completed Day 9 Multi-Agent MCP/A2A project is in:
+
+```text
+day9_multi_agent_mcp_a2a/
+```
+
+See `day9_multi_agent_mcp_a2a/SUBMISSION_CHECKLIST.md` for the completed checklist and verification notes.
+
 **Chương 2 | Ngày 8 trong 15**
 
 ---
